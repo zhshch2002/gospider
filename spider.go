@@ -1,9 +1,9 @@
 package gospider
 
 import (
-	"errors"
 	"fmt"
 	"github.com/PuerkitoBio/goquery"
+	"github.com/pkg/errors"
 	"github.com/tidwall/gjson"
 	"github.com/zhshch2002/goreq"
 	"sync"
@@ -13,52 +13,50 @@ var (
 	UnknownExt = errors.New("unknown ext")
 )
 
-type Handler func(ctx *Context)
+type Handler func(ctx *Task)
 type Extension func(s *Spider)
 
-type Task struct {
-	Req      *goreq.Request
-	Handlers []Handler
-	Meta     map[string]interface{}
-}
-
 type Item struct {
-	Ctx  *Context
+	Ctx  *Task
 	Data interface{}
 }
 
-func NewTask(req *goreq.Request, meta map[string]interface{}, a ...Handler) (t *Task) {
+func NewTask(req *goreq.Request, s *Spider, meta map[string]interface{}, a ...Handler) (t *Task) {
 	t = &Task{
-		Req:      req,
+		Response: &goreq.Response{
+			Req: req,
+		},
+		s:        s,
 		Handlers: a,
 		Meta:     meta,
+		abort:    false,
 	}
 	return
 }
 
 type Spider struct {
-	Name    string
-	Logging bool
+	Name       string
+	Logging    bool
+	SyncOnItem bool //TODO
 
 	Client *goreq.Client
-	Status *SpiderStatus
 	wg     sync.WaitGroup
 
-	onTaskHandlers      []func(ctx *Context, t *Task) *Task
+	onTaskHandlers      []func(t *Task) *Task
 	onRespHandlers      []Handler
-	onItemHandlers      []func(ctx *Context, i interface{}) interface{}
-	onRecoverHandlers   []func(ctx *Context, err error)
-	onReqErrorHandlers  []func(ctx *Context, err error)
-	onRespErrorHandlers []func(ctx *Context, err error)
+	onItemHandlers      []func(ctx *Task, i interface{}) interface{}
+	onRecoverHandlers   []func(ctx *Task, err error)
+	onReqErrorHandlers  []func(ctx *Task, err error)
+	onRespErrorHandlers []func(ctx *Task, err error)
 }
 
 func NewSpider(e ...interface{}) *Spider {
 	s := &Spider{
-		Name:    "spider",
-		Logging: true,
-		Client:  goreq.NewClient(),
-		Status:  NewSpiderStatus(),
-		wg:      sync.WaitGroup{},
+		Name:       "gospider",
+		Logging:    true,
+		SyncOnItem: false,
+		Client:     goreq.NewClient(),
+		wg:         sync.WaitGroup{},
 	}
 	s.Use(e...)
 	return s
@@ -91,66 +89,80 @@ func (s *Spider) Wait() {
 }
 
 func (s *Spider) handleTask(t *Task) {
-	s.Status.FinishTask()
-	ctx := &Context{
-		s:     s,
-		Req:   t.Req,
-		Resp:  nil,
-		Meta:  t.Meta,
-		abort: false,
-	}
 	defer func() {
 		if err := recover(); err != nil {
-			if s.Logging {
-				log.Error().Err(fmt.Errorf("%v", err)).Str("spider", s.Name).Str("context", fmt.Sprint(ctx)).Str("stack", SprintStack()).Msg("handler recover from panic")
-			}
 			if e, ok := err.(error); ok {
-				s.handleOnError(ctx, e)
+				if s.Logging {
+					Logger.Error().
+						Stack().
+						Err(errors.WithStack(e)).
+						Str("spider", s.Name).
+						Str("task", fmt.Sprint(t)).
+						Msg("handler recover from panic")
+				}
+				s.handleOnError(t, e)
 			} else {
-				s.handleOnError(ctx, fmt.Errorf("%v", err))
+				if s.Logging {
+					Logger.Error().
+						Stack().
+						Err(errors.WithStack(fmt.Errorf("%v", err))).
+						Str("spider", s.Name).
+						Str("task", fmt.Sprint(t)).
+						Msg("handler recover from panic")
+				}
+				s.handleOnError(t, fmt.Errorf("%v", err))
 			}
 		}
 	}()
+
 	if t.Req.Err != nil {
 		if s.Logging {
-			log.Error().Err(fmt.Errorf("%v", ctx.Req.Err)).Str("spider", s.Name).Str("context", fmt.Sprint(ctx)).Str("stack", SprintStack()).Msg("req error")
+			Logger.Error().
+				Stack().
+				Err(t.Req.Err).
+				Str("spider", s.Name).
+				Str("task", fmt.Sprint(t)).
+				Msg("req error")
 		}
-		s.handleOnReqError(ctx, t.Req.Err)
+		s.handleOnReqError(t, t.Req.Err)
 		return
 	}
-	ctx.Resp = s.Client.Do(t.Req)
-	if ctx.Resp.Err != nil {
-		if s.Logging {
-			log.Error().Err(fmt.Errorf("%v", ctx.Resp.Err)).Str("spider", s.Name).Str("context", fmt.Sprint(ctx)).Str("stack", SprintStack()).Msg("resp error")
-		}
-		s.handleOnRespError(ctx, ctx.Resp.Err)
-		return
-	}
-	if s.Logging {
-		log.Debug().Str("Spider", s.Name).Str("context", fmt.Sprint(ctx)).Msg("Finish")
 
+	t.Response = s.Client.Do(t.Req)
+	if t.Err != nil {
+		if s.Logging {
+			Logger.Error().
+				Stack().
+				Err(t.Err).
+				Str("spider", s.Name).
+				Str("task", fmt.Sprint(t)).
+				Msg("resp error")
+		}
+		s.handleOnRespError(t, t.Err)
+		return
 	}
-	s.handleOnResp(ctx)
-	if ctx.IsAborted() {
+
+	if s.Logging {
+		Logger.Debug().
+			Str("spider", s.Name).
+			Str("context", fmt.Sprint(t)).
+			Msg("finish")
+	}
+
+	s.handleOnResp(t)
+	if t.IsAborted() {
 		return
 	}
 	for _, fn := range t.Handlers {
-		fn(ctx)
-		if ctx.IsAborted() {
+		fn(t)
+		if t.IsAborted() {
 			return
 		}
 	}
 }
 
-func (s *Spider) SeedTask(req *goreq.Request, h ...Handler) {
-	ctx := &Context{
-		s:     s,
-		Req:   nil,
-		Resp:  nil,
-		Meta:  map[string]interface{}{},
-		abort: false,
-	}
-	ctx.AddTask(req, h...)
+func (s *Spider) StartFrom(req *goreq.Request, h ...Handler) {
+	s.addTask(NewTask(req, s, map[string]interface{}{}, h...))
 }
 
 func (s *Spider) addTask(t *Task) {
@@ -159,7 +171,6 @@ func (s *Spider) addTask(t *Task) {
 		defer s.wg.Done()
 		s.handleTask(t)
 	}()
-	s.Status.AddTask()
 }
 
 func (s *Spider) addItem(i *Item) {
@@ -168,18 +179,17 @@ func (s *Spider) addItem(i *Item) {
 		defer s.wg.Done()
 		s.handleOnItem(i)
 	}()
-	s.Status.AddItem()
 }
 
 /*************************************************************************************/
-func (s *Spider) OnTask(fn func(ctx *Context, t *Task) *Task) {
+func (s *Spider) OnTask(fn func(t *Task) *Task) {
 	s.onTaskHandlers = append(s.onTaskHandlers, fn)
 }
-func (s *Spider) handleOnTask(ctx *Context, t *Task) *Task {
+func (s *Spider) handleOnTask(t *Task) *Task {
 	for _, fn := range s.onTaskHandlers {
-		t = fn(ctx, t)
-		if t == nil {
-			return t
+		t = fn(t)
+		if t == nil || t.IsAborted() {
+			return nil
 		}
 	}
 	return t
@@ -189,50 +199,63 @@ func (s *Spider) handleOnTask(ctx *Context, t *Task) *Task {
 func (s *Spider) OnResp(fn Handler) {
 	s.onRespHandlers = append(s.onRespHandlers, fn)
 }
-func (s *Spider) OnHTML(selector string, fn func(ctx *Context, sel *goquery.Selection)) {
-	s.OnResp(func(ctx *Context) {
-		if ctx.Resp.IsHTML() {
-			if h, err := ctx.Resp.HTML(); err == nil {
+func (s *Spider) OnHTML(selector string, fn func(t *Task, sel *goquery.Selection)) {
+	s.OnResp(func(t *Task) {
+		if t.IsHTML() {
+			if h, err := t.HTML(); err == nil {
 				h.Find(selector).Each(func(i int, selection *goquery.Selection) {
-					fn(ctx, selection)
+					fn(t, selection)
 				})
 			}
 		}
 	})
 }
-func (s *Spider) OnJSON(q string, fn func(ctx *Context, j gjson.Result)) {
-	s.onRespHandlers = append(s.onRespHandlers, func(ctx *Context) {
-		if ctx.Resp.IsJSON() {
-			if j, err := ctx.Resp.JSON(); err == nil {
+func (s *Spider) OnJSON(q string, fn func(t *Task, j gjson.Result)) {
+	s.onRespHandlers = append(s.onRespHandlers, func(t *Task) {
+		if t.IsJSON() {
+			if j, err := t.JSON(); err == nil {
 				if res := j.Get(q); res.Exists() {
-					fn(ctx, res)
+					fn(t, res)
 				}
 			}
 		}
 	})
 }
-func (s *Spider) handleOnResp(ctx *Context) {
+func (s *Spider) handleOnResp(t *Task) {
 	for _, fn := range s.onRespHandlers {
-		if ctx.IsAborted() {
+		if t.IsAborted() {
 			return
 		}
-		fn(ctx)
+		fn(t)
 	}
 }
 
 /*************************************************************************************/
-func (s *Spider) OnItem(fn func(ctx *Context, i interface{}) interface{}) {
+func (s *Spider) OnItem(fn func(t *Task, i interface{}) interface{}) {
 	s.onItemHandlers = append(s.onItemHandlers, fn)
 }
 func (s *Spider) handleOnItem(i *Item) {
 	defer func() {
 		if err := recover(); err != nil {
-			if s.Logging {
-				log.Error().Err(fmt.Errorf("%v", err)).Str("spider", s.Name).Str("context", fmt.Sprint(i.Ctx)).Str("stack", SprintStack()).Msg("OnItem recover from panic")
-			}
 			if e, ok := err.(error); ok {
+				if s.Logging {
+					Logger.Error().
+						Stack().
+						Err(errors.WithStack(e)).
+						Str("spider", s.Name).
+						Str("context", fmt.Sprint(i.Ctx)).
+						Msg("handler recover from panic")
+				}
 				s.handleOnError(i.Ctx, e)
 			} else {
+				if s.Logging {
+					Logger.Error().
+						Stack().
+						Err(errors.WithStack(fmt.Errorf("%v", err))).
+						Str("spider", s.Name).
+						Str("context", fmt.Sprint(i.Ctx)).
+						Msg("handler recover from panic")
+				}
 				s.handleOnError(i.Ctx, fmt.Errorf("%v", err))
 			}
 		}
@@ -246,27 +269,29 @@ func (s *Spider) handleOnItem(i *Item) {
 }
 
 /*************************************************************************************/
-func (s *Spider) OnRecover(fn func(ctx *Context, err error)) {
+func (s *Spider) OnRecover(fn func(t *Task, err error)) {
 	s.onRecoverHandlers = append(s.onRecoverHandlers, fn)
 }
-func (s *Spider) handleOnError(ctx *Context, err error) {
+func (s *Spider) handleOnError(t *Task, err error) {
 	for _, fn := range s.onRecoverHandlers {
-		fn(ctx, err)
+		fn(t, err)
 	}
 }
-func (s *Spider) OnRespError(fn func(ctx *Context, err error)) {
+
+func (s *Spider) OnRespError(fn func(t *Task, err error)) {
 	s.onRespErrorHandlers = append(s.onRespErrorHandlers, fn)
 }
-func (s *Spider) handleOnRespError(ctx *Context, err error) {
+func (s *Spider) handleOnRespError(t *Task, err error) {
 	for _, fn := range s.onRespErrorHandlers {
-		fn(ctx, err)
+		fn(t, err)
 	}
 }
-func (s *Spider) OnReqError(fn func(ctx *Context, err error)) {
+
+func (s *Spider) OnReqError(fn func(t *Task, err error)) {
 	s.onReqErrorHandlers = append(s.onReqErrorHandlers, fn)
 }
-func (s *Spider) handleOnReqError(ctx *Context, err error) {
+func (s *Spider) handleOnReqError(t *Task, err error) {
 	for _, fn := range s.onReqErrorHandlers {
-		fn(ctx, err)
+		fn(t, err)
 	}
 }
