@@ -13,11 +13,11 @@ var (
 	UnknownExt = errors.New("unknown ext")
 )
 
-type Handler func(ctx *Task)
+type Handler func(t *Task)
 type Extension func(s *Spider)
 
 type Item struct {
-	Ctx  *Task
+	Task *Task
 	Data interface{}
 }
 
@@ -35,28 +35,26 @@ func NewTask(req *goreq.Request, s *Spider, meta map[string]interface{}, a ...Ha
 }
 
 type Spider struct {
-	Name       string
-	Logging    bool
-	SyncOnItem bool //TODO
+	Name    string
+	Logging bool
 
 	Client *goreq.Client
 	wg     sync.WaitGroup
 
-	onTaskHandlers      []func(t *Task) *Task
+	onTaskHandlers      []func(o, t *Task) *Task
 	onRespHandlers      []Handler
-	onItemHandlers      []func(ctx *Task, i interface{}) interface{}
-	onRecoverHandlers   []func(ctx *Task, err error)
-	onReqErrorHandlers  []func(ctx *Task, err error)
-	onRespErrorHandlers []func(ctx *Task, err error)
+	onItemHandlers      []func(t *Task, i interface{}) interface{}
+	onRecoverHandlers   []func(t *Task, err error)
+	onReqErrorHandlers  []func(t *Task, err error)
+	onRespErrorHandlers []func(t *Task, err error)
 }
 
 func NewSpider(e ...interface{}) *Spider {
 	s := &Spider{
-		Name:       "gospider",
-		Logging:    true,
-		SyncOnItem: false,
-		Client:     goreq.NewClient(),
-		wg:         sync.WaitGroup{},
+		Name:    "gospider",
+		Logging: true,
+		Client:  goreq.NewClient(),
+		wg:      sync.WaitGroup{},
 	}
 	s.Use(e...)
 	return s
@@ -161,8 +159,15 @@ func (s *Spider) handleTask(t *Task) {
 	}
 }
 
-func (s *Spider) StartFrom(req *goreq.Request, h ...Handler) {
-	s.addTask(NewTask(req, s, map[string]interface{}{}, h...))
+func (s *Spider) AddRootTask(req *goreq.Request, h ...Handler) {
+	var nilTask = &Task{
+		Response: nil,
+		s:        s,
+		Handlers: []Handler{},
+		Meta:     map[string]interface{}{},
+		abort:    false,
+	}
+	nilTask.AddTask(req, h...)
 }
 
 func (s *Spider) addTask(t *Task) {
@@ -182,12 +187,12 @@ func (s *Spider) addItem(i *Item) {
 }
 
 /*************************************************************************************/
-func (s *Spider) OnTask(fn func(t *Task) *Task) {
+func (s *Spider) OnTask(fn func(o, t *Task) *Task) {
 	s.onTaskHandlers = append(s.onTaskHandlers, fn)
 }
-func (s *Spider) handleOnTask(t *Task) *Task {
+func (s *Spider) handleOnTask(o, t *Task) *Task {
 	for _, fn := range s.onTaskHandlers {
-		t = fn(t)
+		t = fn(o, t)
 		if t == nil || t.IsAborted() {
 			return nil
 		}
@@ -243,25 +248,25 @@ func (s *Spider) handleOnItem(i *Item) {
 						Stack().
 						Err(errors.WithStack(e)).
 						Str("spider", s.Name).
-						Str("context", fmt.Sprint(i.Ctx)).
+						Str("context", fmt.Sprint(i.Task)).
 						Msg("handler recover from panic")
 				}
-				s.handleOnError(i.Ctx, e)
+				s.handleOnError(i.Task, e)
 			} else {
 				if s.Logging {
 					Logger.Error().
 						Stack().
 						Err(errors.WithStack(fmt.Errorf("%v", err))).
 						Str("spider", s.Name).
-						Str("context", fmt.Sprint(i.Ctx)).
+						Str("context", fmt.Sprint(i.Task)).
 						Msg("handler recover from panic")
 				}
-				s.handleOnError(i.Ctx, fmt.Errorf("%v", err))
+				s.handleOnError(i.Task, fmt.Errorf("%v", err))
 			}
 		}
 	}()
 	for _, fn := range s.onItemHandlers {
-		i.Data = fn(i.Ctx, i.Data)
+		i.Data = fn(i.Task, i.Data)
 		if i.Data == nil {
 			return
 		}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/rs/zerolog"
 	"github.com/zhshch2002/goreq"
+	"strings"
 )
 
 type Task struct {
@@ -29,7 +30,7 @@ func (c *Task) AddTask(req *goreq.Request, h ...Handler) {
 	if !req.URL.IsAbs() {
 		req.URL = c.Req.URL.ResolveReference(req.URL)
 	}
-	t := c.s.handleOnTask(NewTask(req, c.s, c.Meta, h...))
+	t := c.s.handleOnTask(c, NewTask(req, c.s, MetaCopy(c.Meta), h...))
 	if t == nil {
 		return
 	}
@@ -39,7 +40,7 @@ func (c *Task) AddTask(req *goreq.Request, h ...Handler) {
 // AddItem start a new goroutine to execute the OnItem handler chain
 func (c *Task) AddItem(i interface{}) {
 	c.s.addItem(&Item{
-		Ctx:  c,
+		Task: c,
 		Data: i,
 	})
 }
@@ -49,12 +50,20 @@ func (c *Task) IsDownloaded() bool {
 	return c.Response != nil
 }
 
-func (c *Task) Println(v ...interface{}) { // TODO
-	Logger.Print(v...)
+func (c *Task) Println(v ...interface{}) {
+	Logger.Info().Str("spider", c.s.Name).Str("task", c.String()).Msg(strings.TrimRight(fmt.Sprintln(v...), "\n"))
 }
 
-func (c *Task) Error() *zerolog.Event {
-	return Logger.Error()
+func (c *Task) Debug(v ...interface{}) {
+	Logger.Debug().Str("spider", c.s.Name).Str("task", c.String()).Msg(strings.TrimRight(fmt.Sprintln(v...), "\n"))
+}
+
+func (c *Task) Error(err error) {
+	Logger.Err(err).Stack().Str("spider", c.s.Name).Str("task", c.String()).Send()
+}
+
+func (c *Task) Logger() zerolog.Logger {
+	return Logger
 }
 
 func (c *Task) String() string {
