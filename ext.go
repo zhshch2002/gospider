@@ -2,7 +2,6 @@ package gospider
 
 import (
 	"context"
-	"crypto/md5"
 	"encoding/csv"
 	"fmt"
 	"github.com/rs/zerolog"
@@ -16,10 +15,10 @@ import (
 
 func WithDeduplicate() Extension {
 	return func(s *Spider) {
-		CrawledHash := map[[md5.Size]byte]struct{}{}
+		CrawledHash := map[string]struct{}{}
 		lock := sync.Mutex{}
-		s.OnTask(func(ctx *Context, t *Task) *Task {
-			has := GetRequestHash(t.Req)
+		s.OnTask(func(o, t *Task) *Task {
+			has := goreq.GetRequestHash(t.Req)
 			lock.Lock()
 			defer lock.Unlock()
 			if _, ok := CrawledHash[has]; ok {
@@ -34,14 +33,17 @@ func WithDeduplicate() Extension {
 
 func WithRobotsTxt(ua string) Extension {
 	return func(s *Spider) {
+		if ua == "" {
+			ua = s.Name
+		}
 		rs := map[string]*robots.Robots{}
-		s.OnTask(func(ctx *Context, t *Task) *Task {
+		s.OnTask(func(o, t *Task) *Task {
 			var r *robots.Robots
 			if a, ok := rs[t.Req.URL.Host]; ok {
 				r = a
 			} else {
 				if u, err := t.Req.URL.Parse("/robots.txt"); err == nil {
-					if resp, err := goreq.Get(u.String()).Do().Resp(); err == nil && resp.StatusCode == 200 {
+					if resp, err := goreq.Get(u.String()).SetUA(ua).Do().Resp(); err == nil && resp.StatusCode == 200 {
 						r = robots.New(strings.NewReader(resp.Text), ua)
 						rs[t.Req.URL.Host] = r
 					}
@@ -59,12 +61,12 @@ func WithRobotsTxt(ua string) Extension {
 
 func WithDepthLimit(max int) Extension {
 	return func(s *Spider) {
-		s.OnTask(func(ctx *Context, t *Task) *Task {
-			if ctx.Req == nil || ctx.Req.Context().Value("depth") == nil {
+		s.OnTask(func(o, t *Task) *Task {
+			if o.Response == nil || o.Req == nil || o.Req.Context().Value("depth") == nil {
 				t.Req.Request = t.Req.WithContext(context.WithValue(t.Req.Context(), "depth", 1))
 				return t
 			} else {
-				depth := ctx.Req.Context().Value("depth").(int)
+				depth := o.Req.Context().Value("depth").(int)
 				if depth < max {
 					t.Req.Request = t.Req.WithContext(context.WithValue(t.Req.Context(), "depth", depth+1))
 					return t
@@ -79,7 +81,7 @@ func WithDepthLimit(max int) Extension {
 func WithMaxReqLimit(max int64) Extension {
 	return func(s *Spider) {
 		count := int64(0)
-		s.OnTask(func(ctx *Context, t *Task) *Task {
+		s.OnTask(func(o, t *Task) *Task {
 			if count < max {
 				atomic.AddInt64(&count, 1)
 				return t
@@ -91,37 +93,38 @@ func WithMaxReqLimit(max int64) Extension {
 
 func WithErrorLog(f io.Writer) Extension {
 	return func(s *Spider) {
-		l := zerolog.New(f).With().Timestamp().Logger()
-		send := func(ctx *Context, err error, t, stack string) {
+		l := zerolog.New(f).With().Timestamp().Stack().Logger()
+		send := func(task *Task, err error, t, stack string) {
 			event := l.Err(err).
+				Stack().
 				Str("spider", s.Name).
 				Str("type", "item").
-				Str("ctx", fmt.Sprint(ctx)).
-				Str("url", ctx.Req.URL.String()).
-				AnErr("req err", ctx.Req.Err).
-				AnErr("resp err", ctx.Resp.Err)
-			if ctx.Resp != nil {
-				event.Int("resp code", ctx.Resp.StatusCode)
-				if ctx.Resp.Text != "" {
-					event.Str("text", ctx.Resp.Text)
+				Str("task", fmt.Sprint(task)).
+				Str("url", task.Req.URL.String()).
+				AnErr("req err", task.Req.Err).
+				AnErr("resp err", task.Response.Err)
+			if task.Response != nil {
+				event.Int("resp code", task.Response.StatusCode)
+				if task.Response.Text != "" {
+					event.Str("text", task.Response.Text)
 				}
 			}
 			event.Str("stack", SprintStack()).Send()
 		}
 
-		s.OnItem(func(ctx *Context, i interface{}) interface{} {
+		s.OnItem(func(ctx *Task, i interface{}) interface{} {
 			if err, ok := i.(error); ok {
 				send(ctx, err, "item", SprintStack())
 			}
 			return i
 		})
-		s.OnRecover(func(ctx *Context, err error) {
+		s.OnRecover(func(ctx *Task, err error) {
 			send(ctx, err, "OnRecover", SprintStack())
 		})
-		s.OnReqError(func(ctx *Context, err error) {
+		s.OnReqError(func(ctx *Task, err error) {
 			send(ctx, err, "OnReqError", SprintStack())
 		})
-		s.OnRespError(func(ctx *Context, err error) {
+		s.OnRespError(func(ctx *Task, err error) {
 			send(ctx, err, "OnRespError", SprintStack())
 		})
 	}
@@ -133,13 +136,13 @@ func WithCsvItemSaver(f io.Writer) Extension {
 	lock := sync.Mutex{}
 	w := csv.NewWriter(f)
 	return func(s *Spider) {
-		s.OnItem(func(ctx *Context, i interface{}) interface{} {
+		s.OnItem(func(ctx *Task, i interface{}) interface{} {
 			if data, ok := i.(CsvItem); ok {
 				lock.Lock()
 				defer lock.Unlock()
 				err := w.Write(data)
 				if err != nil {
-					log.Err(err).Msg("WithCsvItemSaver Error")
+					Logger.Err(err).Msg("WithCsvItemSaver Error")
 				}
 				w.Flush()
 			}
