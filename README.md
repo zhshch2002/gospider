@@ -1,6 +1,6 @@
 # Gospider
 
-[![codecov](https://codecov.io/gh/zhshch2002/gospider/branch/master/graph/badge.svg)](https://codecov.io/gh/zhshch2002/gospider)
+[![gopkg](https://img.shields.io/badge/go-pkg-blue)](https://pkg.go.dev/github.com/zhshch2002/gospider)
 [![goproxycn](https://goproxy.cn/stats/github.com/zhshch2002/gospider/badges/download-count.svg)](https://goproxy.cn)
 ![Go Test](https://github.com/zhshch2002/gospider/workflows/Go%20Test/badge.svg)
 [![codecov](https://codecov.io/gh/zhshch2002/gospider/branch/master/graph/badge.svg)](https://codecov.io/gh/zhshch2002/gospider)
